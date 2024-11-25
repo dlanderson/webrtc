@@ -287,18 +287,18 @@ impl Agent {
                 return Err(Error::ErrAddressParseFailed);
             }
 
-            let ai = Arc::clone(&self.internal);
-            let host_candidate = Arc::clone(c);
-            let mdns_conn = self.mdns_conn.clone();
-            tokio::spawn(async move {
-                if let Some(mdns_conn) = mdns_conn {
-                    if let Ok(candidate) =
-                        Self::resolve_and_add_multicast_candidate(mdns_conn, host_candidate).await
-                    {
-                        ai.add_remote_candidate(&candidate).await;
-                    }
-                }
-            });
+            // let ai = Arc::clone(&self.internal);
+            // let host_candidate = Arc::clone(c);
+            // let mdns_conn = self.mdns_conn.clone();
+            // tokio::spawn(async move {
+            //     if let Some(mdns_conn) = mdns_conn {
+            //         if let Ok(candidate) =
+            //             Self::resolve_and_add_multicast_candidate(mdns_conn, host_candidate).await
+            //         {
+            //             ai.add_remote_candidate(&candidate).await;
+            //         }
+            //     }
+            // });
         } else {
             let ai = Arc::clone(&self.internal);
             let candidate = Arc::clone(c);
@@ -339,20 +339,20 @@ impl Agent {
     }
 
     /// Cleans up the Agent.
+    #[tracing::instrument(skip(self))]
     pub async fn close(&self) -> Result<()> {
+        tracing::info!("!!!!!! Inside the ice agent close");
+        tracing::info!("About to cancel candidate gathering");
+        //FIXME: deadlock here
+        let internal_close = self.internal.close().await;
         if let Some(gather_candidate_cancel) = &self.gather_candidate_cancel {
             gather_candidate_cancel();
         }
-
         if let UDPNetwork::Muxed(ref udp_mux) = self.udp_network {
             let (ufrag, _) = self.get_local_user_credentials().await;
             udp_mux.remove_conn_by_ufrag(&ufrag).await;
         }
-
-        Self::close_multicast_conn(&self.mdns_conn).await;
-
-        //FIXME: deadlock here
-        self.internal.close().await
+        internal_close
     }
 
     /// Returns the selected pair or nil if there is none
@@ -376,6 +376,7 @@ impl Agent {
     ///
     /// Restart must only be called when `GatheringState` is `GatheringStateComplete`
     /// a user must then call `GatherCandidates` explicitly to start generating new ones.
+    #[tracing::instrument(skip(self))]
     pub async fn restart(&self, mut ufrag: String, mut pwd: String) -> Result<()> {
         if ufrag.is_empty() {
             ufrag = generate_ufrag();
@@ -399,13 +400,6 @@ impl Agent {
         self.gathering_state
             .store(GatheringState::New as u8, Ordering::SeqCst);
 
-        {
-            let done_tx = self.internal.done_tx.lock().await;
-            if done_tx.is_none() {
-                return Err(Error::ErrClosed);
-            }
-        }
-
         // Clear all agent needed to take back to fresh state
         {
             let mut ufrag_pwd = self.internal.ufrag_pwd.lock().await;
@@ -421,6 +415,7 @@ impl Agent {
 
         {
             let mut checklist = self.internal.agent_conn.checklist.lock().await;
+            tracing::info!("nullifying the checklist");
             *checklist = vec![];
         }
 

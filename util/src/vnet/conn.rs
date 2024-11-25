@@ -3,7 +3,7 @@ mod conn_test;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use portable_atomic::AtomicBool;
@@ -34,7 +34,7 @@ pub(crate) struct UdpConn {
     read_ch_tx: Arc<Mutex<Option<ChunkChTx>>>,
     read_ch_rx: Mutex<mpsc::Receiver<Box<dyn Chunk + Send + Sync>>>,
     closed: AtomicBool,
-    obs: Weak<Mutex<dyn ConnObserver + Send + Sync>>,
+    obs: Arc<Mutex<dyn ConnObserver + Send + Sync>>,
 }
 
 impl UdpConn {
@@ -45,14 +45,13 @@ impl UdpConn {
     ) -> Self {
         let (read_ch_tx, read_ch_rx) = mpsc::channel(MAX_READ_QUEUE_SIZE);
 
-        let weak_obs = Arc::downgrade(&obs);
         UdpConn {
             loc_addr,
             rem_addr: RwLock::new(rem_addr),
             read_ch_tx: Arc::new(Mutex::new(Some(read_ch_tx))),
             read_ch_rx: Mutex::new(read_ch_rx),
             closed: AtomicBool::new(false),
-            obs: weak_obs,
+            obs,
         }
     }
 
@@ -113,10 +112,8 @@ impl Conn for UdpConn {
     /// send_to writes a packet with payload p to addr.
     /// send_to can be made to time out and return
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> Result<usize> {
-        let obs = self.obs.upgrade().ok_or_else(|| Error::ErrVnetDisabled)?;
-
         let src_ip = {
-            let obs = obs.lock().await;
+            let obs = self.obs.lock().await;
             match obs.determine_source_ip(self.loc_addr.ip(), target.ip()) {
                 Some(ip) => ip,
                 None => return Err(Error::ErrLocAddr),
@@ -129,7 +126,7 @@ impl Conn for UdpConn {
         chunk.user_data = buf.to_vec();
         {
             let c: Box<dyn Chunk + Send + Sync> = Box::new(chunk);
-            let obs = obs.lock().await;
+            let obs = self.obs.lock().await;
             obs.write(c).await?
         }
 
@@ -145,8 +142,6 @@ impl Conn for UdpConn {
     }
 
     async fn close(&self) -> Result<()> {
-        let obs = self.obs.upgrade().ok_or_else(|| Error::ErrVnetDisabled)?;
-
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::ErrAlreadyClosed);
         }
@@ -156,7 +151,7 @@ impl Conn for UdpConn {
             reach_ch.take();
         }
         {
-            let obs = obs.lock().await;
+            let obs = self.obs.lock().await;
             obs.on_closed(self.loc_addr).await;
         }
 

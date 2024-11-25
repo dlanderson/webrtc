@@ -139,6 +139,7 @@ pub async fn local_interfaces(
     ips
 }
 
+#[tracing::instrument(skip(vnet))]
 pub async fn listen_udp_in_port_range(
     vnet: &Arc<Net>,
     port_max: u16,
@@ -146,6 +147,7 @@ pub async fn listen_udp_in_port_range(
     laddr: SocketAddr,
 ) -> Result<Arc<dyn Conn + Send + Sync>> {
     if laddr.port() != 0 || (port_min == 0 && port_max == 0) {
+        tracing::info!("!!!!! bind {laddr}");
         return Ok(vnet.bind(laddr).await?);
     }
     let i = if port_min == 0 { 1 } else { port_min };
@@ -158,6 +160,7 @@ pub async fn listen_udp_in_port_range(
     let mut port_current = port_start;
     loop {
         let laddr = SocketAddr::new(laddr.ip(), port_current);
+        tracing::info!("!!!!! bind in a loop {laddr}");
         match vnet.bind(laddr).await {
             Ok(c) => return Ok(c),
             Err(err) => log::debug!("failed to listen {}: {}", laddr, err),

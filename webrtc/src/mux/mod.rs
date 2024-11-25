@@ -87,6 +87,7 @@ impl Mux {
 
     /// Close closes the Mux and all associated Endpoints.
     pub async fn close(&mut self) {
+        tracing::info!("!!!!!!!!!!! closing the Mux");
         self.closed_ch_tx.take();
 
         let mut endpoints = self.endpoints.lock().await;
@@ -103,7 +104,10 @@ impl Mux {
         let mut n = 0usize;
         loop {
             tokio::select! {
-                _ = closed_ch_rx.recv() => break,
+                _ = closed_ch_rx.recv() => {
+                    tracing::info!("!!!!!!!!!!!!!!! mux: readLoop closed_ch_rx recv");
+                    break
+                },
                 result = next_conn.recv(&mut buf) => {
                     if let Ok(m) = result{
                         n = m;

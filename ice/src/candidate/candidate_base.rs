@@ -48,7 +48,7 @@ pub struct CandidateBase {
     pub(crate) last_received: AtomicU64,
 
     pub(crate) conn: Option<Arc<dyn util::Conn + Send + Sync>>,
-    pub(crate) closed_ch: Arc<Mutex<Option<broadcast::Sender<()>>>>,
+    pub(crate) closed_ch: Arc<tokio::sync::Notify>,
 
     pub(crate) foundation_override: String,
     pub(crate) priority_override: u32,
@@ -78,7 +78,7 @@ impl Default for CandidateBase {
             last_received: AtomicU64::new(0),
 
             conn: None,
-            closed_ch: Arc::new(Mutex::new(None)),
+            closed_ch: Arc::new(tokio::sync::Notify::new()),
 
             foundation_override: String::new(),
             priority_override: 0,
@@ -90,7 +90,7 @@ impl Default for CandidateBase {
 
 // String makes the candidateBase printable
 impl fmt::Display for CandidateBase {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if let Some(related_address) = self.related_address() {
             write!(
                 f,
@@ -237,22 +237,27 @@ impl Candidate for CandidateBase {
 
     /// Stops the recvLoop.
     async fn close(&self) -> Result<()> {
-        {
-            let mut closed_ch = self.closed_ch.lock().await;
-            if closed_ch.is_none() {
-                return Err(Error::ErrClosed);
-            }
-            closed_ch.take();
-        }
+        // {
+        //     let mut closed_ch = self.closed_ch.lock().await;
+        //     if closed_ch.is_none() {
+        //         return Err(Error::ErrClosed);
+        //     }
+        //     closed_ch.take();
+        // }
 
+        tracing::info!("candidateBase close");
         if let Some(relay_client) = &self.relay_client {
             let _ = relay_client.close().await;
+            tracing::info!("relay client closed");
         }
 
         if let Some(conn) = &self.conn {
             let _ = conn.close().await;
+            tracing::info!("connection closed");
         }
 
+        self.closed_ch.notify_waiters();
+        tracing::info!("candidateBase close done");
         Ok(())
     }
 
@@ -305,7 +310,7 @@ impl Candidate for CandidateBase {
         self.conn.as_ref()
     }
 
-    fn get_closed_ch(&self) -> Arc<Mutex<Option<broadcast::Sender<()>>>> {
+    fn get_closed_ch(&self) -> Arc<tokio::sync::Notify> {
         self.closed_ch.clone()
     }
 }

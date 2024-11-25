@@ -17,7 +17,7 @@ pub(crate) struct SenderReportInternal {
     pub(crate) interval: Duration,
     pub(crate) now: Option<FnTimeGen>,
     pub(crate) streams: Mutex<HashMap<u32, Arc<SenderStream>>>,
-    pub(crate) close_rx: Mutex<Option<mpsc::Receiver<()>>>,
+    pub(crate) close_rx: tokio_util::sync::CancellationToken,
 }
 
 /// SenderReport interceptor generates sender reports.
@@ -25,7 +25,7 @@ pub struct SenderReport {
     pub(crate) internal: Arc<SenderReportInternal>,
 
     pub(crate) wg: Mutex<Option<WaitGroup>>,
-    pub(crate) close_tx: Mutex<Option<mpsc::Sender<()>>>,
+    pub(crate) close_tx: tokio_util::sync::CancellationToken,
 }
 
 impl SenderReport {
@@ -38,8 +38,7 @@ impl SenderReport {
     }
 
     async fn is_closed(&self) -> bool {
-        let close_tx = self.close_tx.lock().await;
-        close_tx.is_none()
+        self.close_tx.is_cancelled()
     }
 
     async fn run(
@@ -47,15 +46,7 @@ impl SenderReport {
         internal: Arc<SenderReportInternal>,
     ) -> Result<()> {
         let mut ticker = tokio::time::interval(internal.interval);
-        let mut close_rx = {
-            let mut close_rx = internal.close_rx.lock().await;
-            if let Some(close) = close_rx.take() {
-                close
-            } else {
-                return Err(Error::ErrInvalidCloseRx);
-            }
-        };
-
+        let close_rx = internal.close_rx.clone();
         loop {
             tokio::select! {
                 _ = ticker.tick() =>{
@@ -78,7 +69,7 @@ impl SenderReport {
                         }
                     }
                 }
-                _ = close_rx.recv() =>{
+                _ = close_rx.cancelled() =>{
                     return Ok(());
                 }
             }
@@ -165,11 +156,7 @@ impl Interceptor for SenderReport {
 
     /// close closes the Interceptor, cleaning up any data if necessary.
     async fn close(&self) -> Result<()> {
-        {
-            let mut close_tx = self.close_tx.lock().await;
-            close_tx.take();
-        }
-
+        self.close_tx.cancel();
         {
             let mut wait_group = self.wg.lock().await;
             if let Some(wg) = wait_group.take() {
