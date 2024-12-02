@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 const DEMO_IP: &str = "1.2.3.4";
 
@@ -50,8 +49,7 @@ async fn test_resolver_cascaded() -> Result<()> {
     let ip1 = IpAddr::from_str(ip_addr1)?;
     r1.add_host(name1.to_owned(), ip_addr1.to_owned())?;
 
-    let resolver0 = Arc::new(Mutex::new(r0));
-    r1.set_parent(Arc::downgrade(&resolver0));
+    r1.set_parent(Arc::new(Mutex::new(r0)));
 
     if let Some(resolved) = r1.lookup(name0.to_owned()).await {
         assert_eq!(resolved, ip0, "should match");

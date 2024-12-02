@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use log::*;
 use portable_atomic::{AtomicBool, AtomicU16};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::Duration;
 use util::replay_detector::*;
 use util::Conn;
@@ -64,8 +64,7 @@ struct ConnReaderContext {
     cache: HandshakeCache,
     cipher_suite: Arc<Mutex<Option<Box<dyn CipherSuite + Send + Sync>>>>,
     remote_epoch: Arc<AtomicU16>,
-    // use additional oneshot sender to mimic rendezvous channel behavior
-    handshake_tx: mpsc::Sender<(oneshot::Sender<()>, mpsc::Sender<()>)>,
+    handshake_tx: mpsc::Sender<mpsc::Sender<()>>,
     handshake_done_rx: mpsc::Receiver<()>,
     packet_tx: Arc<mpsc::Sender<PacketSendRequest>>,
 }
@@ -97,14 +96,13 @@ pub struct DTLSConn {
     pub(crate) flights: Option<Vec<Packet>>,
     pub(crate) cfg: HandshakeConfig,
     pub(crate) retransmit: bool,
-    // use additional oneshot sender to mimic rendezvous channel behavior
-    pub(crate) handshake_rx: mpsc::Receiver<(oneshot::Sender<()>, mpsc::Sender<()>)>,
+    pub(crate) handshake_rx: mpsc::Receiver<mpsc::Sender<()>>,
 
     pub(crate) packet_tx: Arc<mpsc::Sender<PacketSendRequest>>,
     pub(crate) handle_queue_tx: mpsc::Sender<mpsc::Sender<()>>,
     pub(crate) handshake_done_tx: Option<mpsc::Sender<()>>,
 
-    reader_close_tx: Mutex<Option<mpsc::Sender<()>>>,
+    reader_close_notify: std::sync::Arc<tokio::sync::Notify>,
 }
 
 type UtilResult<T> = std::result::Result<T, util::Error>;
@@ -286,7 +284,7 @@ impl DTLSConn {
         let (handshake_done_tx, handshake_done_rx) = mpsc::channel(1);
         let (packet_tx, mut packet_rx) = mpsc::channel(1);
         let (handle_queue_tx, mut handle_queue_rx) = mpsc::channel(1);
-        let (reader_close_tx, mut reader_close_rx) = mpsc::channel(1);
+        let reader_close_notify = std::sync::Arc::new(tokio::sync::Notify::new());
 
         let packet_tx = Arc::new(packet_tx);
         let packet_tx2 = Arc::clone(&packet_tx);
@@ -315,35 +313,40 @@ impl DTLSConn {
             packet_tx,
             handle_queue_tx,
             handshake_done_tx: Some(handshake_done_tx),
-            reader_close_tx: Mutex::new(Some(reader_close_tx)),
+            reader_close_notify: reader_close_notify.clone(),
         };
 
         let cipher_suite1 = Arc::clone(&c.state.cipher_suite);
         let sequence_number = Arc::clone(&c.state.local_sequence_number);
 
-        tokio::spawn(async move {
-            loop {
-                let rx = packet_rx.recv().await;
-                if let Some(r) = rx {
-                    let (pkt, result_tx) = r;
+        tokio::spawn({
+            let reader_close_notify = reader_close_notify.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = reader_close_notify.notified() => {
+                            break;
+                        }
+                        Some((pkt, result_tx)) = packet_rx.recv() => {
+                            let result = DTLSConn::handle_outgoing_packets(
+                                &next_conn_tx,
+                                pkt,
+                                &mut cache1,
+                                is_client,
+                                &sequence_number,
+                                &cipher_suite1,
+                                maximum_transmission_unit,
+                            )
+                            .await;
 
-                    let result = DTLSConn::handle_outgoing_packets(
-                        &next_conn_tx,
-                        pkt,
-                        &mut cache1,
-                        is_client,
-                        &sequence_number,
-                        &cipher_suite1,
-                        maximum_transmission_unit,
-                    )
-                    .await;
-
-                    if let Some(tx) = result_tx {
-                        let _ = tx.send(result).await;
+                            if let Some(tx) = result_tx {
+                                let _ = tx.send(result).await;
+                            }
+                        }
+                        else => {
+                            break;
+                        }
                     }
-                } else {
-                    trace!("{}: handle_outgoing_packets exit", srv_cli_str(is_client));
-                    break;
                 }
             }
         });
@@ -352,55 +355,58 @@ impl DTLSConn {
         let remote_epoch = Arc::clone(&c.state.remote_epoch);
         let cipher_suite2 = Arc::clone(&c.state.cipher_suite);
 
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; INBOUND_BUFFER_SIZE];
-            let mut ctx = ConnReaderContext {
-                is_client,
-                replay_protection_window,
-                replay_detector: vec![],
-                decrypted_tx,
-                encrypted_packets: vec![],
-                fragment_buffer: FragmentBuffer::new(),
-                cache: cache2,
-                cipher_suite: cipher_suite2,
-                remote_epoch,
-                handshake_tx,
-                handshake_done_rx,
-                packet_tx: packet_tx2,
-            };
+        tokio::spawn({
+            let reader_close_notify = reader_close_notify.clone();
+            async move {
+                let mut buf = vec![0u8; INBOUND_BUFFER_SIZE];
+                let mut ctx = ConnReaderContext {
+                    is_client,
+                    replay_protection_window,
+                    replay_detector: vec![],
+                    decrypted_tx,
+                    encrypted_packets: vec![],
+                    fragment_buffer: FragmentBuffer::new(),
+                    cache: cache2,
+                    cipher_suite: cipher_suite2,
+                    remote_epoch,
+                    handshake_tx,
+                    handshake_done_rx,
+                    packet_tx: packet_tx2,
+                };
 
-            //trace!("before enter read_and_buffer: {}] ", srv_cli_str(is_client));
-            loop {
-                tokio::select! {
-                    _ = reader_close_rx.recv() => {
-                        trace!(
-                                "{}: read_and_buffer exit",
-                                srv_cli_str(ctx.is_client),
-                            );
-                        break;
-                    }
-                    result = DTLSConn::read_and_buffer(
-                                            &mut ctx,
-                                            &next_conn_rx,
-                                            &mut handle_queue_rx,
-                                            &mut buf,
-                                            &local_epoch,
-                                            &handshake_completed_successfully2,
-                                        ) => {
-                        if let Err(err) = result {
+                //trace!("before enter read_and_buffer: {}] ", srv_cli_str(is_client));
+                loop {
+                    tokio::select! {
+                        _ = reader_close_notify.notified() => {
                             trace!(
-                                "{}: read_and_buffer return err: {}",
-                                srv_cli_str(is_client),
-                                err
-                            );
-                            if Error::ErrAlertFatalOrClose == err {
-                                trace!(
-                                    "{}: read_and_buffer exit with {}",
+                                    "{}: read_and_buffer exit",
                                     srv_cli_str(ctx.is_client),
+                                );
+                            break;
+                        }
+                        result = DTLSConn::read_and_buffer(
+                                                &mut ctx,
+                                                &next_conn_rx,
+                                                &mut handle_queue_rx,
+                                                &mut buf,
+                                                &local_epoch,
+                                                &handshake_completed_successfully2,
+                                            ) => {
+                            if let Err(err) = result {
+                                trace!(
+                                    "{}: read_and_buffer return err: {}",
+                                    srv_cli_str(is_client),
                                     err
                                 );
+                                if Error::ErrAlertFatalOrClose == err {
+                                    trace!(
+                                        "{}: read_and_buffer exit with {}",
+                                        srv_cli_str(ctx.is_client),
+                                        err
+                                    );
 
-                                break;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -503,10 +509,7 @@ impl DTLSConn {
             self.notify(AlertLevel::Warning, AlertDescription::CloseNotify)
                 .await?;
 
-            {
-                let mut reader_close_tx = self.reader_close_tx.lock().await;
-                reader_close_tx.take();
-            }
+            self.reader_close_notify.notify_waiters();
             self.conn.close().await?;
         }
 
@@ -832,13 +835,9 @@ impl DTLSConn {
 
         if has_handshake {
             let (done_tx, mut done_rx) = mpsc::channel(1);
-            let rendezvous_at_handshake = async {
-                let (rendezvous_tx, rendezvous_rx) = oneshot::channel();
-                _ = ctx.handshake_tx.send((rendezvous_tx, done_tx)).await;
-                rendezvous_rx.await
-            };
+
             tokio::select! {
-                _ = rendezvous_at_handshake => {
+                _ = ctx.handshake_tx.send(done_tx) => {
                     let mut wait_done_rx = true;
                     while wait_done_rx{
                         tokio::select!{

@@ -57,7 +57,7 @@ struct ICETransportInternal {
     role: RTCIceRole,
     conn: Option<Arc<dyn Conn + Send + Sync>>, //AgentConn
     mux: Option<Mux>,
-    cancel_tx: Option<mpsc::Sender<()>>,
+    cancel_tx: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// ICETransport allows an application access to information about the ICE
@@ -147,18 +147,18 @@ impl RTCIceTransport {
                 RTCIceRole::Controlled
             };
 
-            let (cancel_tx, cancel_rx) = mpsc::channel(1);
+            let cancell_notifier = std::sync::Arc::new(tokio::sync::Notify::new());
             {
                 let mut internal = self.internal.lock().await;
                 internal.role = role;
-                internal.cancel_tx = Some(cancel_tx);
+                internal.cancel_tx = cancell_notifier.clone();
             }
 
             let conn: Arc<dyn Conn + Send + Sync> = match role {
                 RTCIceRole::Controlling => {
                     agent
                         .dial(
-                            cancel_rx,
+                            cancell_notifier.clone(),
                             params.username_fragment.clone(),
                             params.password.clone(),
                         )
@@ -168,7 +168,7 @@ impl RTCIceTransport {
                 RTCIceRole::Controlled => {
                     agent
                         .accept(
-                            cancel_rx,
+                            cancell_notifier.clone(),
                             params.username_fragment.clone(),
                             params.password.clone(),
                         )
@@ -216,26 +216,32 @@ impl RTCIceTransport {
     }
 
     /// Stop irreversibly stops the ICETransport.
+    #[tracing::instrument(skip(self))]
     pub async fn stop(&self) -> Result<()> {
         self.set_state(RTCIceTransportState::Closed);
 
         let mut errs: Vec<Error> = vec![];
         {
+            tracing::debug!("!!!! about to close the self.internal");
             let mut internal = self.internal.lock().await;
-            internal.cancel_tx.take();
+            internal.cancel_tx.notify_waiters();
             if let Some(mut mux) = internal.mux.take() {
                 mux.close().await;
             }
+            tracing::debug!("!!!! about to close the internal.conn");
             if let Some(conn) = internal.conn.take() {
                 if let Err(err) = conn.close().await {
                     errs.push(err.into());
                 }
             }
+            tracing::debug!("!!!! done internal.conn");
         }
 
+        tracing::debug!("!!!! about to close the gatherer");
         if let Err(err) = self.gatherer.close().await {
             errs.push(err);
         }
+        tracing::debug!("!!!! done gatherer");
 
         flatten_errs(errs)
     }

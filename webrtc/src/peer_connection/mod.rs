@@ -236,13 +236,9 @@ impl RTCPeerConnection {
         };
 
         let weak_interceptor = Arc::downgrade(&interceptor);
-        let (internal, configuration) = PeerConnectionInternal::new(
-            api,
-            weak_interceptor,
-            Arc::downgrade(&stats_interceptor),
-            configuration,
-        )
-        .await?;
+        let (internal, configuration) =
+            PeerConnectionInternal::new(api, weak_interceptor, stats_interceptor, configuration)
+                .await?;
         let internal_rtcp_writer = Arc::clone(&internal) as Arc<dyn RTCPWriter + Send + Sync>;
         let interceptor_rtcp_writer = interceptor.bind_rtcp_writer(internal_rtcp_writer).await;
 
@@ -649,14 +645,6 @@ impl RTCPeerConnection {
             let mut f = handler.lock().await;
             f(cs).await;
         }
-    }
-
-    /// restart_ice restart ICE and triggers negotiation needed
-    /// <https://w3c.github.io/webrtc-pc/#dom-rtcpeerconnection-restartice>
-    pub async fn restart_ice(&self) -> Result<()> {
-        self.internal.ice_transport.restart().await?;
-        self.internal.trigger_negotiation_needed().await;
-        Ok(())
     }
 
     // set_configuration updates the configuration of this PeerConnection object.
@@ -1925,11 +1913,15 @@ impl RTCPeerConnection {
     }
 
     /// close ends the PeerConnection
+    #[tracing::instrument(skip(self))]
     pub async fn close(&self) -> Result<()> {
-        // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #1)
-        if self.internal.is_closed.load(Ordering::SeqCst) {
-            return Ok(());
-        }
+        let id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(?id, "!!!! closing peer connection");
+        // // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #1)
+        // if self.internal.is_closed.load(Ordering::SeqCst) {
+        //     tracing::info!(?id, "peer connection is already closed");
+        //     return Ok(());
+        // }
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #2)
         self.internal.is_closed.store(true, Ordering::SeqCst);
@@ -1947,48 +1939,58 @@ impl RTCPeerConnection {
         //    continue the chain the Mux has to be closed.
         let mut close_errs = vec![];
 
+        tracing::info!(?id, "about to close interceptor");
         if let Err(err) = self.interceptor.close().await {
             close_errs.push(Error::new(format!("interceptor: {err}")));
         }
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #4)
+        tracing::info!(?id, "about to close transivers");
         {
             let mut rtp_transceivers = self.internal.rtp_transceivers.lock().await;
-            for t in &*rtp_transceivers {
+            for t in rtp_transceivers.drain(..) {
                 if let Err(err) = t.stop().await {
                     close_errs.push(Error::new(format!("rtp_transceivers: {err}")));
                 }
             }
-            rtp_transceivers.clear();
         }
 
+        tracing::info!(?id, "about to close data channels");
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #5)
         {
             let mut data_channels = self.internal.sctp_transport.data_channels.lock().await;
-            for d in &*data_channels {
+            for d in data_channels.drain(..) {
                 if let Err(err) = d.close().await {
+                    tracing::error!(?id, "data channel close error: {:?}", err);
                     close_errs.push(Error::new(format!("data_channels: {err}")));
                 }
             }
-            data_channels.clear();
         }
+        tracing::info!(?id, "data channels closed");
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #6)
+        tracing::info!(?id, "about to close sctp transport");
         if let Err(err) = self.internal.sctp_transport.stop().await {
             close_errs.push(Error::new(format!("sctp_transport: {err}")));
         }
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #7)
+        tracing::info!(?id, "about to close dtls transport");
         if let Err(err) = self.internal.dtls_transport.stop().await {
             close_errs.push(Error::new(format!("dtls_transport: {err}")));
         }
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #8, #9, #10)
+        tracing::info!(?id, "about to close the ice transport");
         if let Err(err) = self.internal.ice_transport.stop().await {
+            tracing::error!(?id, "ice transport stop error: {}", err);
             close_errs.push(Error::new(format!("ice_transport: {err}")));
         }
 
+        tracing::info!(?id, "ice transport closed");
+
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #11)
+        tracing::info!(?id, "about to update the connection state");
         RTCPeerConnection::update_connection_state(
             &self.internal.on_peer_connection_state_change_handler,
             &self.internal.is_closed,
@@ -1997,11 +1999,14 @@ impl RTCPeerConnection {
             self.internal.dtls_transport.state(),
         )
         .await;
+        tracing::info!(?id, "connection state updated");
 
+        tracing::info!(?id, "about to close ops");
         if let Err(err) = self.internal.ops.close().await {
             close_errs.push(Error::new(format!("ops: {err}")));
         }
-
+        tracing::info!(?id, "ops stopped");
+        tracing::info!(?id, "peer connection close done done");
         flatten_errs(close_errs)
     }
 

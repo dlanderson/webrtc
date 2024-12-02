@@ -42,14 +42,17 @@ tokio = { version = "1.32.0", features = [
 log = "0.4"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
+tokio-util.workspace = true
 serde_json = "1"
 rand = "0.8"
 bytes = "1"
 thiserror = "1"
+tracing.workspace = true
 waitgroup = "0.1"
 regex = "1.9.5"
 smol_str = { version = "0.2", features = ["serde"] }
 url = "2"
+uuid.workspace = true
 rustls = { version = "0.23.10", default-features = false, features = ["std", "ring"] }
 rcgen = { version = "0.13", features = ["pem", "x509-parser"]}
 ring = "0.17"

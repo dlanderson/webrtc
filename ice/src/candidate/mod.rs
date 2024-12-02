@@ -85,7 +85,7 @@ pub trait Candidate: fmt::Display {
     fn equal(&self, other: &dyn Candidate) -> bool;
     fn set_ip(&self, ip: &IpAddr) -> Result<()>;
     fn get_conn(&self) -> Option<&Arc<dyn util::Conn + Send + Sync>>;
-    fn get_closed_ch(&self) -> Arc<Mutex<Option<broadcast::Sender<()>>>>;
+    fn get_closed_ch(&self) -> Arc<tokio::sync::Notify>;
 }
 
 /// Represents the type of candidate `CandidateType` enum.

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::marker::{Send, Sync};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use channel_bind::*;
 use five_tuple::*;
@@ -34,7 +34,7 @@ use crate::proto::*;
 
 const RTP_MTU: usize = 1500;
 
-pub type AllocationMap = HashMap<FiveTuple, Arc<Allocation>>;
+pub type AllocationMap = Arc<Mutex<HashMap<FiveTuple, Arc<Allocation>>>>;
 
 /// Information about an [`Allocation`].
 #[derive(Debug, Clone)]
@@ -44,9 +44,6 @@ pub struct AllocationInfo {
 
     /// Username of this [`Allocation`].
     pub username: String,
-
-    /// Relay address of this [`Allocation`].
-    pub relay_addr: SocketAddr,
 
     /// Relayed bytes with this [`Allocation`].
     #[cfg(feature = "metrics")]
@@ -58,13 +55,11 @@ impl AllocationInfo {
     pub fn new(
         five_tuple: FiveTuple,
         username: String,
-        relay_addr: SocketAddr,
         #[cfg(feature = "metrics")] relayed_bytes: usize,
     ) -> Self {
         Self {
             five_tuple,
             username,
-            relay_addr,
             #[cfg(feature = "metrics")]
             relayed_bytes,
         }
@@ -82,7 +77,7 @@ pub struct Allocation {
     username: Username,
     permissions: Arc<Mutex<HashMap<String, Permission>>>,
     channel_bindings: Arc<Mutex<HashMap<ChannelNumber, ChannelBind>>>,
-    allocations: Weak<Mutex<AllocationMap>>,
+    pub(crate) allocations: Option<AllocationMap>,
     reset_tx: SyncMutex<Option<mpsc::Sender<Duration>>>,
     timer_expired: Arc<AtomicBool>,
     closed: AtomicBool, // Option<mpsc::Receiver<()>>,
@@ -103,7 +98,6 @@ impl Allocation {
         relay_addr: SocketAddr,
         five_tuple: FiveTuple,
         username: Username,
-        allocation_map: Weak<Mutex<AllocationMap>>,
         alloc_close_notify: Option<mpsc::Sender<AllocationInfo>>,
     ) -> Self {
         Allocation {
@@ -115,7 +109,7 @@ impl Allocation {
             username,
             permissions: Arc::new(Mutex::new(HashMap::new())),
             channel_bindings: Arc::new(Mutex::new(HashMap::new())),
-            allocations: allocation_map,
+            allocations: None,
             reset_tx: SyncMutex::new(None),
             timer_expired: Arc::new(AtomicBool::new(false)),
             closed: AtomicBool::new(false),
@@ -143,7 +137,7 @@ impl Allocation {
             }
         }
 
-        p.permissions = Some(Arc::downgrade(&self.permissions));
+        p.permissions = Some(Arc::clone(&self.permissions));
         p.start(PERMISSION_TIMEOUT).await;
 
         {
@@ -190,7 +184,7 @@ impl Allocation {
         let peer = c.peer;
 
         // Add or refresh this channel.
-        c.channel_bindings = Some(Arc::downgrade(&self.channel_bindings));
+        c.channel_bindings = Some(Arc::clone(&self.channel_bindings));
         c.start(lifetime).await;
 
         {
@@ -260,7 +254,6 @@ impl Allocation {
                 .send(AllocationInfo {
                     five_tuple: self.five_tuple,
                     username: self.username.text.clone(),
-                    relay_addr: self.relay_addr,
                     #[cfg(feature = "metrics")]
                     relayed_bytes: self.relayed_bytes.load(Ordering::Acquire),
                 })
@@ -286,7 +279,7 @@ impl Allocation {
             while !done {
                 tokio::select! {
                     _ = &mut timer => {
-                        if let Some(allocs) = &allocations.upgrade(){
+                        if let Some(allocs) = &allocations{
                             let mut allocs = allocs.lock().await;
                             if let Some(a) = allocs.remove(&five_tuple) {
                                 let _ = a.close().await;
@@ -362,7 +355,7 @@ impl Allocation {
                         match result {
                             Ok((n, src_addr)) => (n, src_addr),
                             Err(_) => {
-                                if let Some(allocs) = &allocations.upgrade() {
+                                if let Some(allocs) = &allocations {
                                     let mut allocs = allocs.lock().await;
                                     allocs.remove(&five_tuple);
                                 }
