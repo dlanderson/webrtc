@@ -511,7 +511,6 @@ impl Stream {
         };
 
         self.pending_queue.push(c).await;
-
         self.awake_write_loop();
         Ok(())
     }

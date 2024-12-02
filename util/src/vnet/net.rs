@@ -532,13 +532,13 @@ impl Net {
                 tokio::spawn(async move {
                     loop {
                         if let Some(socket_strong) = socket_weak.upgrade() {
-                            tracing::info!(
+                            tracing::debug!(
                                 "strong count for the socket is {}, address: {:?}",
                                 Arc::strong_count(&socket_strong),
                                 addr,
                             );
                         } else {
-                            tracing::info!("socket is dropped {addr:?}");
+                            tracing::debug!("socket is dropped {addr:?}");
                             break;
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

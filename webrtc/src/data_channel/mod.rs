@@ -429,6 +429,7 @@ impl RTCDataChannel {
 
     /// Close Closes the DataChannel. It may be called regardless of whether
     /// the DataChannel object was created by this peer or the remote peer.
+    #[tracing::instrument(skip(self))]
     pub async fn close(&self) -> Result<()> {
         if self.ready_state() == RTCDataChannelState::Closed {
             return Ok(());

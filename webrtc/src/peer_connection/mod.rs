@@ -1915,12 +1915,13 @@ impl RTCPeerConnection {
     /// close ends the PeerConnection
     #[tracing::instrument(skip(self))]
     pub async fn close(&self) -> Result<()> {
-        tracing::info!("!!!! closing peer connection");
+        let id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(?id, "!!!! closing peer connection");
         // // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #1)
-        if self.internal.is_closed.load(Ordering::SeqCst) {
-            tracing::info!("peer connection is already closed");
-            return Ok(());
-        }
+        // if self.internal.is_closed.load(Ordering::SeqCst) {
+        //     tracing::info!(?id, "peer connection is already closed");
+        //     return Ok(());
+        // }
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #2)
         self.internal.is_closed.store(true, Ordering::SeqCst);
@@ -1938,15 +1939,13 @@ impl RTCPeerConnection {
         //    continue the chain the Mux has to be closed.
         let mut close_errs = vec![];
 
-        tracing::info!("About to close interceptor");
+        tracing::info!(?id, "about to close interceptor");
         if let Err(err) = self.interceptor.close().await {
             close_errs.push(Error::new(format!("interceptor: {err}")));
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #4)
-        tracing::info!("About to close transivers");
+        tracing::info!(?id, "about to close transivers");
         {
             let mut rtp_transceivers = self.internal.rtp_transceivers.lock().await;
             for t in rtp_transceivers.drain(..) {
@@ -1955,48 +1954,43 @@ impl RTCPeerConnection {
                 }
             }
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        tracing::info!("About to close data channels");
+        tracing::info!(?id, "about to close data channels");
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #5)
         {
             let mut data_channels = self.internal.sctp_transport.data_channels.lock().await;
             for d in data_channels.drain(..) {
                 if let Err(err) = d.close().await {
+                    tracing::error!(?id, "data channel close error: {:?}", err);
                     close_errs.push(Error::new(format!("data_channels: {err}")));
                 }
             }
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tracing::info!(?id, "data channels closed");
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #6)
-        tracing::info!("About to close sctp transport");
+        tracing::info!(?id, "about to close sctp transport");
         if let Err(err) = self.internal.sctp_transport.stop().await {
             close_errs.push(Error::new(format!("sctp_transport: {err}")));
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #7)
-        tracing::info!("about to close dtls transport");
+        tracing::info!(?id, "about to close dtls transport");
         if let Err(err) = self.internal.dtls_transport.stop().await {
             close_errs.push(Error::new(format!("dtls_transport: {err}")));
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #8, #9, #10)
-        tracing::info!("about to close the ice transport");
+        tracing::info!(?id, "about to close the ice transport");
         if let Err(err) = self.internal.ice_transport.stop().await {
-            tracing::error!("ice transport stop error: {}", err);
+            tracing::error!(?id, "ice transport stop error: {}", err);
             close_errs.push(Error::new(format!("ice_transport: {err}")));
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        tracing::info!(?id, "ice transport closed");
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #11)
+        tracing::info!(?id, "about to update the connection state");
         RTCPeerConnection::update_connection_state(
             &self.internal.on_peer_connection_state_change_handler,
             &self.internal.is_closed,
@@ -2005,15 +1999,14 @@ impl RTCPeerConnection {
             self.internal.dtls_transport.state(),
         )
         .await;
+        tracing::info!(?id, "connection state updated");
 
-        tracing::info!("about to close ops");
+        tracing::info!(?id, "about to close ops");
         if let Err(err) = self.internal.ops.close().await {
             close_errs.push(Error::new(format!("ops: {err}")));
         }
-        // tracing::info!("done");
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        // tracing::info!("close done");
-
+        tracing::info!(?id, "ops stopped");
+        tracing::info!(?id, "peer connection close done done");
         flatten_errs(close_errs)
     }
 

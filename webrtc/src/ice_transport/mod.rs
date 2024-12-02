@@ -222,30 +222,26 @@ impl RTCIceTransport {
 
         let mut errs: Vec<Error> = vec![];
         {
-            tracing::info!("!!!! about to close the self.internal");
+            tracing::debug!("!!!! about to close the self.internal");
             let mut internal = self.internal.lock().await;
             internal.cancel_tx.notify_waiters();
             if let Some(mut mux) = internal.mux.take() {
                 mux.close().await;
             }
-            tracing::info!("!!!! done self.internal");
-            // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            tracing::info!("!!!! about to close the internal.conn");
+            tracing::debug!("!!!! about to close the internal.conn");
             if let Some(conn) = internal.conn.take() {
                 if let Err(err) = conn.close().await {
                     errs.push(err.into());
                 }
             }
-            tracing::info!("!!!! done internal.conn");
+            tracing::debug!("!!!! done internal.conn");
         }
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        tracing::info!("!!!! about to close the gatherer");
+        tracing::debug!("!!!! about to close the gatherer");
         if let Err(err) = self.gatherer.close().await {
             errs.push(err);
         }
-        // tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        tracing::info!("!!!! done gatherer");
+        tracing::debug!("!!!! done gatherer");
 
         flatten_errs(errs)
     }

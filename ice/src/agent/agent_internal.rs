@@ -619,7 +619,6 @@ impl AgentInternal {
         }
 
         tracing::info!("Just cancelled all candidates");
-        // tokio::time::sleep(Duration::from_secs(2)).await;
 
         self.agent_conn.buffer.close().await;
 
@@ -672,10 +671,6 @@ impl AgentInternal {
                 }
             }
         }
-
-        tracing::info!("-----------------------");
-        // tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
         {
             let mut remote_candidates = self.remote_candidates.lock().await;
             for cs in remote_candidates.values_mut() {
